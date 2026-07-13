@@ -11,156 +11,133 @@ white='\033[0;37m'
 rest='\033[0m'
 
 if [ -d "$HOME/.termux" ] && [ -z "$(command -v jq)" ]; then
-    echo "Running update & upgrade ..."
-    pkg update -y
-    pkg upgrade -y
+    echo -e "${yellow}Running update & upgrade ...${rest}"
+    pkg update -y && pkg upgrade -y
 fi
 
 # Check and install necessary packages
 install_packages() {
-    local packages=(wget curl unzip jq)
+    local packages=(wget curl unzip jq netcat-openbsd)
+    # For Termux, netcat is usually 'netcat' instead of 'netcat-openbsd'
+    [ -d "$HOME/.termux" ] && packages=(wget curl unzip jq netcat)
+    
     local missing_packages=()
-
-    # Check for missing packages
     for pkg in "${packages[@]}"; do
         if ! command -v "$pkg" &> /dev/null; then
             missing_packages+=("$pkg")
         fi
     done
 
-    # If any package is missing, install missing packages
     if [ ${#missing_packages[@]} -gt 0 ]; then
+        echo -e "${cyan}Installing missing packages: ${missing_packages[*]}${rest}"
         if [ -n "$(command -v pkg)" ]; then
             pkg install "${missing_packages[@]}" -y
         elif [ -n "$(command -v apt)" ]; then
-            sudo apt update -y
-            sudo apt install "${missing_packages[@]}" -y
-        elif [ -n "$(command -v yum)" ]; then
-            sudo yum update -y
-            sudo yum install "${missing_packages[@]}" -y
+            sudo apt update -y && sudo apt install "${missing_packages[@]}" -y
         elif [ -n "$(command -v dnf)" ]; then
-            sudo dnf update -y
             sudo dnf install "${missing_packages[@]}" -y
+        elif [ -n "$(command -v yum)" ]; then
+            sudo yum install "${missing_packages[@]}" -y
         else
-            echo -e "${yellow}Unsupported package manager. Please install required packages manually.${rest}"
+            echo -e "${red}Unsupported package manager.${rest}"
             exit 1
         fi
     else
-        echo -e "${green}All packages are already installed.${rest}"
+        echo -e "${green}All required packages are already installed.${rest}"
     fi
 }
 
 install_packages
-# Download and install Xray if not already installed
-latest_version=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name | sed 's/^v//')
 
-installed_version=""
-if [ -x "$PREFIX/bin/xray" ]; then
-    installed_version=$($PREFIX/bin/xray -version | grep -oE 'Xray [^ ]+' | awk '{print $2}')
-fi
-
-if [ "$installed_version" != "$latest_version" ]; then
-    echo -e "${yellow}Installing or upgrading Xray to version $latest_version...${rest}"
+# Download and install Xray
+install_xray() {
+    latest_version=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name | sed 's/^v//')
+    installed_version=""
     
-    rm -f $PREFIX/bin/xray geoip.dat geosite.dat
-    file_name="Xray-android-arm64-v8a.zip"
-    url="https://github.com/XTLS/Xray-core/releases/download/v$latest_version/$file_name"
-
-    wget "$url" -O "$file_name" || { echo -e "${red}Download failed.${rest}"; exit 1; }
-    unzip -o "$file_name" || { echo -e "${red}Unzip failed.${rest}"; exit 1; }
-
-    mv xray "$PREFIX/bin/"
-    chmod +x "$PREFIX/bin/xray"
-
-    rm -f README.md LICENSE "$file_name"
-
     if [ -x "$PREFIX/bin/xray" ]; then
-        echo -e "${green}Xray $latest_version installed successfully.${rest}"
-    else
-        echo -e "${red}Xray installation failed.${rest}"
-        exit 1
+        installed_version=$($PREFIX/bin/xray -version 2>/dev/null | grep -oE 'Xray [^ ]+' | awk '{print $2}')
     fi
-else
-    echo -e "${green}Xray is already up to date (version $installed_version).${rest}"
-fi
+
+    if [ "$installed_version" != "$latest_version" ]; then
+        echo -e "${yellow}Installing/Upgrading Xray to v$latest_version...${rest}"
+        
+        rm -f "$PREFIX/bin/xray" geoip.dat geosite.dat
+        # Automatically detect arch (Usually arm64 for Termux)
+        arch=$(uname -m)
+        file_name="Xray-linux-64.zip"
+        [ "$arch" == "aarch64" ] && file_name="Xray-android-arm64-v8a.zip"
+        [ "$arch" == "armv7l" ] && file_name="Xray-android-arm32-v7a.zip"
+        
+        url="https://github.com/XTLS/Xray-core/releases/download/v$latest_version/$file_name"
+
+        wget -q --show-progress "$url" -O "$file_name" || { echo -e "${red}Download failed.${rest}"; exit 1; }
+        unzip -oq "$file_name" || { echo -e "${red}Unzip failed.${rest}"; exit 1; }
+
+        mv xray "$PREFIX/bin/" 2>/dev/null || sudo mv xray /usr/local/bin/
+        chmod +x "$PREFIX/bin/xray" 2>/dev/null || sudo chmod +x /usr/local/bin/xray
+
+        rm -f README.md LICENSE "$file_name"
+        echo -e "${green}Xray v$latest_version installed successfully.${rest}"
+    else
+        echo -e "${green}Xray is up to date (v$installed_version).${rest}"
+    fi
+}
+
+install_xray
 
 # Fragment Scanner
 fragment_scanner() {
-    # Define paths for xray executable and configuration/log files
     XRAY_PATH="$PREFIX/bin/xray"
     CONFIG_PATH="config.json"
     LOG_FILE="pings.txt"
     XRAY_LOG_FILE="xraylogs.txt"
 
-    # Check if xray executable exists
-    if [ ! -f "$XRAY_PATH" ]; then
-        echo "Error: xray not found"
-        exit 1
+    if [ ! -f "$XRAY_PATH" ] && [ ! -x "$XRAY_PATH" ]; then
+        echo -e "${red}Error: Xray executable not found.${rest}"
+        return
     fi
 
-    # Create log files if they do not exist
-    [ ! -f "$LOG_FILE" ] && touch "$LOG_FILE"
-    [ ! -f "$XRAY_LOG_FILE" ] && touch "$XRAY_LOG_FILE"
+    if [ ! -f "$CONFIG_PATH" ]; then
+        echo -e "${red}Error: config.json not found. Please create a config first (Option 1).${rest}"
+        return
+    fi
 
-    # Clear the content of the log files before running the tests
     > "$LOG_FILE"
     > "$XRAY_LOG_FILE"
 
-    # Prompt user for input values with defaults
-    echo -en "${green}Enter the number of instances (default is 10): ${rest}"
+    echo -en "${green}Enter number of instances (default 15): ${rest}"
     read -r InstancesInput
-    echo -e "${blue}*****************************${rest}"
-    echo -en "${green}Enter the timeout for each ping test in seconds (default is 10): ${rest}"
+    echo -en "${green}Enter timeout per ping in seconds (default 8): ${rest}"
     read -r TimeoutSecInput
-    echo -e "${blue}*****************************${rest}"
-    echo -en "${green}Enter the HTTP Listening port (default is 10809): ${rest}"
+    echo -en "${green}Enter HTTP Proxy Port (default 10809): ${rest}"
     read -r HTTP_PROXY_PORTInput
-    echo -e "${blue}*****************************${rest}"
-    echo -en "${green}Enter the number of requests per instance (default is 3): ${rest}"
+    echo -en "${green}Enter requests per instance (default 4): ${rest}"
     read -r PingCountInput
-    echo -e "${blue}*****************************${rest}"
 
-    # Set default values if inputs are empty
-    Instances=${InstancesInput:-10}
-    TimeoutSec=${TimeoutSecInput:-10}
+    Instances=${InstancesInput:-15}
+    TimeoutSec=${TimeoutSecInput:-8}
     HTTP_PROXY_PORT=${HTTP_PROXY_PORTInput:-10809}
-    PingCount=${PingCountInput:-3}
+    PingCount=${PingCountInput:-4}
 
-    # Increase PingCount by 1 to account for the extra request
-    PingCount=$((PingCount + 1))
-
-    # HTTP Proxy server address
     HTTP_PROXY_SERVER="127.0.0.1"
 
-    # Arrays of possible values for packets, length, and interval
-    packetsOptions=("tlshello" "1-1" "1-2" "1-3" "1-5")
-    lengthOptions=("1-1" "1-2" "1-3" "2-5" "1-5" "1-10" "3-5" "5-10" "3-10" "10-15" "10-30" "10-20" "20-50" "50-100" "100-150")
-    intervalOptions=("1-1" "1-2" "3-5" "1-5" "5-10" "10-15" "10-20" "20-30" "20-50" "40-50" "50-100" "50-80" "100-150" "150-200" "100-200")
+    # Advanced & Optimized Fragment Arrays (Based on anti-DPI research)
+    packetsOptions=("tlshello" "1-1" "1-2" "1-3" "2-3")
+    lengthOptions=("1-1" "1-2" "1-3" "2-5" "1-5" "5-10" "10-20" "20-50")
+    intervalOptions=("1-1" "1-2" "3-5" "5-10" "10-20" "20-50" "50-100")
 
-    # Calculate the maximum possible instances
     maxPossibleInstances=$((${#packetsOptions[@]} * ${#lengthOptions[@]} * ${#intervalOptions[@]}))
 
-    # Validate user input for instances against the maximum possible instances
-    while [ "$Instances" -gt "$maxPossibleInstances" ]; do
-        echo "Error: Number of instances cannot be greater than the maximum possible instances ($maxPossibleInstances)"
-        read -p "Enter the number of instances (default is 10): " InstancesInput
-        Instances=${InstancesInput:-10}
-    done
-
-    # Array to store top three lowest average response times
     declare -a topThree
+    declare -A usedCombinations # Global associative array to prevent duplicates
 
-    # Function to randomly select a value from an array
     get_random_value() {
         local options=("$@")
         echo "${options[RANDOM % ${#options[@]}]}"
     }
 
-    # Function to generate a unique combination of packets, length, and interval values
     get_unique_combination() {
-        local combination
-        declare -A usedCombinations
-
+        local combination packets length interval
         while true; do
             packets=$(get_random_value "${packetsOptions[@]}")
             length=$(get_random_value "${lengthOptions[@]}")
@@ -175,68 +152,51 @@ fragment_scanner() {
         done
     }
 
-    # Function to modify config.json with random parameters
     modify_config() {
-        local packets=$1
-        local length=$2
-        local interval=$3
-
+        local packets=$1 length=$2 interval=$3
         jq --arg packets "$packets" --arg length "$length" --arg interval "$interval" \
             '(.outbounds[] | select(.tag == "fragment") | .settings.fragment) |= {packets: $packets, length: $length, interval: $interval}' \
             "$CONFIG_PATH" > config.tmp && mv config.tmp "$CONFIG_PATH"
     }
 
-    # Function to stop the Xray process
     stop_xray_process() {
-        pkill -f xray
-        sleep 1
-        PIDs=$(pgrep -f xray)
-        if [ -n "$PIDs" ]; then
-            kill -9 $PIDs
-        fi
+        pkill -f "xray run" 2>/dev/null
+        sleep 0.5
+        local pids=$(pgrep -f xray)
+        [ -n "$pids" ] && kill -9 $pids 2>/dev/null
     }
 
-    # Function to perform HTTP requests with proxy and measure response time
+    wait_for_port() {
+        local port=$1 timeout=10 start=$(date +%s)
+        while ! nc -z 127.0.0.1 $port 2>/dev/null; do
+            if [ $(($(date +%s) - $start)) -ge $timeout ]; then return 1; fi
+            sleep 0.2
+        done
+        return 0
+    }
+
     send_http_request() {
-        local pingCount=$1
-        local timeout=$((TimeoutSec * 1000))
-        local url="http://cp.cloudflare.com"
-        local totalTime=0
-        local individualTimes=()
+        local pingCount=$1 url="http://cp.cloudflare.com"
+        local totalTime=0 validPings=0
 
         for ((i=1; i<=pingCount; i++)); do
-            local start=$(date +%s%3N)
-            if curl -s -o /dev/null --max-time "$TimeoutSec" -x "$HTTP_PROXY_SERVER:$HTTP_PROXY_PORT" "$url"; then
-                local end=$(date +%s%3N)
-                local elapsed=$((end - start))
-                totalTime=$((totalTime + elapsed))
-                individualTimes+=("$elapsed")
-            else
-                individualTimes+=(-1)
-                totalTime=$((totalTime + timeout))
+            # Using curl's built-in high-precision timer
+            local time_sec=$(curl -w "%{time_total}" -o /dev/null -s --max-time "$TimeoutSec" -x "$HTTP_PROXY_SERVER:$HTTP_PROXY_PORT" "$url")
+            
+            if [ -n "$time_sec" ] && [ "$(echo "$time_sec > 0" | bc -l 2>/dev/null || awk "BEGIN{print ($time_sec > 0)}")" == "1" ]; then
+                local time_ms=$(awk "BEGIN {printf \"%.0f\", $time_sec * 1000}")
+                totalTime=$((totalTime + time_ms))
+                validPings=$((validPings + 1))
             fi
-            sleep 1
+            sleep 0.5
         done
 
-        local validPings=()
-        for t in "${individualTimes[@]}"; do
-            if [ "$t" -ne -1 ]; then
-                validPings+=("$t")
-            fi
-        done
-
-        if [ "${#validPings[@]}" -gt 0 ]; then
-            averagePing=$((totalTime / ${#validPings[@]}))
+        if [ "$validPings" -gt 0 ]; then
+            echo $((totalTime / validPings))
         else
-            averagePing=0
+            echo 0
         fi
-
-        echo "Individual Ping Times: ${individualTimes[*]}" >> "$LOG_FILE"
-        echo "$averagePing"
     }
-    
-    > "$LOG_FILE"
-    > "$XRAY_LOG_FILE"
 
     echo -e "${yellow}+--------------+-----------------+---------------+-----------------+---------------+${rest}"
     echo -e "${cyan}|   Instance   |     Packets     |     Length    |     Interval    | Average Ping  |${rest}"
@@ -246,17 +206,24 @@ fragment_scanner() {
         read packets length interval <<< "$(get_unique_combination)"
         modify_config "$packets" "$length" "$interval"
         stop_xray_process
-        "$XRAY_PATH" -c "$CONFIG_PATH" &> "$XRAY_LOG_FILE" &
-        sleep 3
+        
+        "$XRAY_PATH" run -c "$CONFIG_PATH" &> "$XRAY_LOG_FILE" &
+        
+        # Smart wait instead of blind sleep 3
+        if ! wait_for_port "$HTTP_PROXY_PORT"; then
+            echo -e "|      $(printf "%-4s" "$((i + 1))")    |       $(printf "%-8s" "$packets")  |      $(printf "%-7s" "$length")  |      $(printf "%-7s" "$interval")    |      FAIL     |"
+            continue
+        fi
 
-        echo "Testing with packets=$packets, length=$length, interval=$interval..." >> "$LOG_FILE"
         averagePing=$(send_http_request "$PingCount")
-        echo "Average Ping Time: $averagePing ms" >> "$LOG_FILE"
-
+        
         topThree+=("$((i + 1)),$packets,$length,$interval,$averagePing")
 
-        printf "|      %-4s    |       %-8s  |      %-7s  |      %-7s    |      %-5s    |\n" "$((i + 1))" "$packets" "$length" "$interval" "$averagePing"
-        sleep 1
+        if [ "$averagePing" -gt 0 ]; then
+            printf "|      %-4s    |       %-8s  |      %-7s  |      %-7s    |      %-5s ms |\n" "$((i + 1))" "$packets" "$length" "$interval" "$averagePing"
+        else
+            printf "|      %-4s    |       %-8s  |      %-7s  |      %-7s    |      FAIL     |\n" "$((i + 1))" "$packets" "$length" "$interval"
+        fi
     done
 
     echo -e "${yellow}+--------------+-----------------+---------------+-----------------+---------------+${rest}"
@@ -264,422 +231,195 @@ fragment_scanner() {
     validResults=()
     for result in "${topThree[@]}"; do
         IFS=',' read -r -a arr <<< "$result"
-        if [ "${arr[4]}" -gt 0 ]; then
-            validResults+=("$result")
-        fi
+        [ "${arr[4]}" -gt 0 ] && validResults+=("$result")
     done
 
-    IFS=$'\n' sortedTopThree=($(sort -t, -k5 -n <<<"${validResults[*]}"))
-    unset IFS
-    echo ""
-    echo -e "${green}Top three lowest average response times:${rest}"
-    echo -e "${blue}******************************************${rest}"
-    for result in "${sortedTopThree[@]:0:3}"; do
-        IFS=',' read -r -a arr <<< "$result"
-        printf "| Instance: %s | Packets: %s | Length: %s | Interval: %s | AverageResponseTime (ms): %s |\n" "${arr[0]}" "${arr[1]}" "${arr[2]}" "${arr[3]}" "${arr[4]}"
-    done
+    if [ ${#validResults[@]} -gt 0 ]; then
+        IFS=$'\n' sortedTopThree=($(sort -t, -k5 -n <<<"${validResults[*]}"))
+        unset IFS
+        echo ""
+        echo -e "${green}Top 3 Best Fragment Configurations:${rest}"
+        echo -e "${blue}******************************************${rest}"
+        for result in "${sortedTopThree[@]:0:3}"; do
+            IFS=',' read -r -a arr <<< "$result"
+            echo -e "${purple}Packets: ${arr[1]} ${cyan}| Length: ${arr[2]} ${cyan}| Interval: ${arr[3]} ${green}-> ${white}${arr[4]} ms${rest}"
+        done
+    else
+        echo -e "${red}No successful pings recorded.${rest}"
+    fi
 
     stop_xray_process
     echo -e "${blue}*****************************${rest}"
-    echo -en "${green}Press Enter to exit the script...${rest}"
+    echo -en "${green}Press Enter to return to menu...${rest}"
     read -r
 }
 
-# ADD FRAGMENT TO CONFIG
+# ADD FRAGMENT TO CONFIG (100% JQ Based - No String Concat Bugs)
 config2Fragment() {
-    # Prompt user for input
     echo -en "${green}Enter your Config [${yellow}VLESS${cyan}/${yellow}VMESS${cyan}/${yellow}TROJAN${green}][${yellow}Ws${cyan}/${yellow}Grpc${green}]: ${rest}"
     read -r link
 
-    # Initialize variables
-    protocol=""
-    network=""
-    address=""
-    port=""
-    uuid=""
-    path=""
-    security=""
-    encryption=""
-    host=""
-    fp=""
-    conn_type=""
-    sni=""
-    name=""
-    pass=""
-    tls=""
-    serviceName=""
+    local protocol="" network="" address="" port="" uuid="" path="" security=""
+    local host="" fp="" sni="" name="" pass="" serviceName="" multiMode="false"
 
-    # Decode & parse VMess configuration
-    vmess() {
-        link=${link#"vmess://"}
-        vmess_config=$(echo "$link" | base64 -d 2>/dev/null)
-        
+    if [[ $link == "vmess://"* ]]; then
+        protocol="vmess"
+        vmess_config=$(echo "${link#vmess://}" | base64 -d 2>/dev/null)
         address=$(echo "$vmess_config" | jq -r '.add')
         port=$(echo "$vmess_config" | jq -r '.port')
         uuid=$(echo "$vmess_config" | jq -r '.id')
-        path=$(echo "$vmess_config" | jq -r '.path')
+        path=$(echo "$vmess_config" | jq -r '.path // empty')
         network=$(echo "$vmess_config" | jq -r '.net')
-        security=$(echo "$vmess_config" | jq -r '.scy')
-        host=$(echo "$vmess_config" | jq -r '.host')
-        type=$(echo "$vmess_config" | jq -r '.type')
-        fp=$(echo "$vmess_config" | jq -r '.fp')
-        tls=$(echo "$vmess_config" | jq -r '.tls')
-        sni=$(echo "$vmess_config" | jq -r '.sni')
-        name=$(echo "$vmess_config" | jq -r '.ps')
-        protocol="vmess"
-        if [[ $type == "multi" ]]; then
-            multiMode="true"
-        else
-            multiMode="false"
-        fi
-    }
+        host=$(echo "$vmess_config" | jq -r '.host // empty')
+        fp=$(echo "$vmess_config" | jq -r '.fp // empty')
+        sni=$(echo "$vmess_config" | jq -r '.sni // empty')
+        name=$(echo "$vmess_config" | jq -r '.ps // "VMess-Frag"')
+        security=$(echo "$vmess_config" | jq -r '.tls // empty')
+        [[ $(echo "$vmess_config" | jq -r '.type') == "multi" ]] && multiMode="true"
 
-    # Decode and parse VLESS configuration
-    vless() {
-        uuid=$(echo "$link" | sed -n 's|^vless://\([a-z0-9\-]*\)@.*|\1|p')
-        address=$(echo "$link" | sed -n 's|^vless://[a-z0-9\-]*@\([0-9a-zA-Z.]*\):.*|\1|p')
-        port=$(echo "$link" | sed -n 's|^vless://[a-z0-9\-]*@[0-9a-zA-Z.]*:\([0-9]*\).*|\1|p')
-        path=$(echo "$link" | sed -n 's|.*path=\([^&]*\).*|\1|p' | sed 's|%2F|/|g')
-        security=$(echo "$link" | sed -n 's|.*security=\([^&]*\).*|\1|p')
-        encryption=$(echo "$link" | sed -n 's|.*encryption=\([^&]*\).*|\1|p')
-        host=$(echo "$link" | sed -n 's|.*host=\([^&]*\).*|\1|p')
-        fp=$(echo "$link" | sed -n 's|.*fp=\([^&]*\).*|\1|p')
-        conn_type=$(echo "$link" | sed -n 's|.*type=\([^&]*\).*|\1|p')
-        sni=$(echo "$link" | sed -n 's|.*sni=\([^&]*\).*|\1|p' | sed 's|#.*||')
-        name=$(echo "$link" | sed -n 's|.*#\([^#]*\)$|\1|p')
-        network=$(echo "$link" | sed -n 's|.*type=\([^&]*\).*|\1|p')
-        serviceName=$(echo "$link" | sed -n 's|.*serviceName=\([^&]*\).*|\1|p' | sed 's|%2F|/|g')
+    elif [[ $link == "vless://"* ]]; then
         protocol="vless"
-        if [[ $link == *"mode=multi"* ]]; then
-            multiMode="true"
-        else
-            multiMode="false"
-        fi
-    }
-
-    # Decode & parse Trojan configuration
-    trojan() {
-        pass=$(echo "$link" | sed -n 's|^trojan://\([^@]*\)@.*|\1|p')
-        address=$(echo "$link" | sed -n 's|^trojan://[^@]*@\([^:]*\):.*|\1|p')
-        port=$(echo "$link" | sed -n 's|^trojan://[^@]*@[^:]*:\([^?]*\).*|\1|p')
+        uuid=$(echo "$link" | sed -n 's|^vless://\([a-z0-9\-]*\)@.*|\1|p')
+        address=$(echo "$link" | sed -n 's|^vless://[a-z0-9\-]*@\([^:]*\):.*|\1|p')
+        port=$(echo "$link" | sed -n 's|.*:\([0-9]*\).*|\1|p')
         path=$(echo "$link" | sed -n 's|.*path=\([^&]*\).*|\1|p' | sed 's|%2F|/|g')
+        network=$(echo "$link" | sed -n 's|.*type=\([^&]*\).*|\1|p')
         security=$(echo "$link" | sed -n 's|.*security=\([^&]*\).*|\1|p')
         host=$(echo "$link" | sed -n 's|.*host=\([^&]*\).*|\1|p')
         fp=$(echo "$link" | sed -n 's|.*fp=\([^&]*\).*|\1|p')
-        conn_type=$(echo "$link" | sed -n 's|.*type=\([^&]*\).*|\1|p' | sed 's|#.*||')
         sni=$(echo "$link" | sed -n 's|.*sni=\([^&]*\).*|\1|p' | sed 's|#.*||')
         name=$(echo "$link" | sed 's|^.*#||')
-        network=$(echo "$link" | sed -n 's|.*type=\([^&]*\).*|\1|p')
-        protocol="trojan"
-        if [[ $link == *"mode=multi"* ]]; then
-            multiMode="true"
-        else
-            multiMode="false"
-        fi
-    }
+        serviceName=$(echo "$link" | sed -n 's|.*serviceName=\([^&]*\).*|\1|p' | sed 's|%2F|/|g')
+        [[ $link == *"mode=multi"* ]] && multiMode="true"
 
-    # Determine protocol and parse configuration
-    if [[ $link == "vmess://"* ]]; then
-        vmess
-    elif [[ $link == "vless://"* ]]; then
-        vless
     elif [[ $link == "trojan://"* ]]; then
-        trojan
-     else
-         echo -e "${red}Unsupported link.${rest}"
-         exit 1
-         
-    fi
-
-    json=$(cat <<EOF
-{
-  "remarks": "$name+Fragment",
-  "log": {
-    "access": "",
-    "error": "",
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    {
-      "tag": "socks",
-      "port": 10808,
-      "listen": "127.0.0.1",
-      "protocol": "socks",
-      "sniffing": {
-        "enabled": true,
-        "destOverride": [
-          "http",
-          "tls"
-        ],
-        "routeOnly": false
-      },
-      "settings": {
-        "auth": "noauth",
-        "udp": true,
-        "allowTransparent": false
-      }
-    },
-    {
-      "tag": "http",
-      "port": 10809,
-      "listen": "127.0.0.1",
-      "protocol": "http",
-      "sniffing": {
-        "enabled": true,
-        "destOverride": [
-          "http",
-          "tls"
-        ],
-        "routeOnly": false
-      },
-      "settings": {
-        "auth": "noauth",
-        "udp": true,
-        "allowTransparent": false
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "tag": "proxy",
-      "protocol": "$protocol",
-      "settings": {
-      
-EOF
-    )
-
-    # Outbound
-    if [[ $protocol == "vmess" || $protocol == "vless" ]]; then
-        json+=$(cat <<EOF
-  "vnext": [
-          {
-            "address": "$address",
-            "port": $port,
-            "users": [
-              {
-                "id": "$uuid",
-                "alterId": 0,
-                "email": "email",
-                "security": "auto",
-                "encryption": "none",
-                "flow": ""
-              }
-            ]
-          }
-        ]
-      },
-      "streamSettings": {
-        "network": "$network",
-      
-EOF
-        )
-    fi
-
-    #Add Trojan settings
-    if [[ $protocol == "trojan" ]]; then
-        json+=$(cat <<EOF
-  "servers": [
-          {
-            "address": "$address",
-            "level": 1,
-            "flow": "",
-            "method": "chacha20-poly1305",
-            "ota": false,
-            "password": "$pass",
-            "port": $port
-          }
-        ]
-      },
-      "streamSettings": {
-        "network": "$network",
-        
-EOF
-        )
-    fi
-
-    # Tls
-    if [[ $tls == "tls" || $security == "tls" ]]; then
-        json+=$(cat <<EOF
-  "security": "tls",
-        "tlsSettings": {
-          "allowInsecure": false,
-          "serverName": "$sni",
-          "alpn": [
-            "h2",
-            "http/1.1"
-          ],
-          "fingerprint": "chrome",
-          "show": false
-        },
-        
-EOF
-        )
-    fi
-
-    # Add GRPC settings if network is grpc
-    if [[ $network == "grpc" ]]; then
-        json+=$(cat <<EOF
-"grpcSettings": {
-          "multiMode": $multiMode,
-          "serviceName": "$serviceName"
-        },
-        
-EOF
-        )
-    fi
-
-    # Add websocket settings for VMess and VLESS WS
-    if [[ $network == "ws" ]]; then
-        json+=$(cat <<EOF
-  "wsSettings": {
-          "path": "$path",
-          "headers": {
-            "Host": "$host"
-          }
-        },
-        
-EOF
-        )
-    fi
-
-    if [[ $tls == "tls" || $security == "tls" ]]; then
-        json+=$(cat <<EOF
-"sockopt": {
-          "dialerProxy": "fragment",
-          "tcpKeepAliveIdle": 100,
-          "mark": 255,
-          "tcpNoDelay": true
-        }
-      }
-    },
-    {
-      "tag": "fragment",
-      "protocol": "freedom",
-      "settings": {
-        "domainStrategy": "AsIs",
-        "fragment": {
-          "packets": "tlshello",
-          "length": "10-20",
-          "interval": "10-20"
-        }
-      },
-      
-EOF
-        )
+        protocol="trojan"
+        pass=$(echo "$link" | sed -n 's|^trojan://\([^@]*\)@.*|\1|p')
+        address=$(echo "$link" | sed -n 's|^trojan://[^@]*@\([^:]*\):.*|\1|p')
+        port=$(echo "$link" | sed -n 's|.*:\([0-9]*\)?.*|\1|p')
+        path=$(echo "$link" | sed -n 's|.*path=\([^&]*\).*|\1|p' | sed 's|%2F|/|g')
+        network=$(echo "$link" | sed -n 's|.*type=\([^&]*\).*|\1|p')
+        security=$(echo "$link" | sed -n 's|.*security=\([^&]*\).*|\1|p')
+        host=$(echo "$link" | sed -n 's|.*host=\([^&]*\).*|\1|p')
+        fp=$(echo "$link" | sed -n 's|.*fp=\([^&]*\).*|\1|p')
+        sni=$(echo "$link" | sed -n 's|.*sni=\([^&]*\).*|\1|p' | sed 's|#.*||')
+        name=$(echo "$link" | sed 's|^.*#||')
+        serviceName=$(echo "$link" | sed -n 's|.*serviceName=\([^&]*\).*|\1|p' | sed 's|%2F|/|g')
+        [[ $link == *"mode=multi"* ]] && multiMode="true"
     else
-        json+=$(cat <<EOF
-"sockopt": {
-          "dialerProxy": "fragment",
-          "tcpKeepAliveIdle": 100,
-          "mark": 255,
-          "tcpNoDelay": true
-        }
-      }
-    },
-    {
-      "tag": "fragment",
-      "protocol": "freedom",
-      "settings": {
-        "domainStrategy": "AsIs",
-        "fragment": {
-          "packets": "1-1",
-          "length": "1-3",
-          "interval": "5"
-        }
-      },
-      
-EOF
-        )
+        echo -e "${red}Unsupported or invalid link.${rest}"
+        return
     fi
 
-    # Complete streamSettings
-    json+=$(cat <<EOF
-"streamSettings": {
-        "sockopt": {
-          "tcpNoDelay": true,
-          "tcpKeepAliveIdle": 100
-        }
-      }
-    },
-    {
-      "tag": "direct",
-      "protocol": "freedom",
-      "settings": {}
-    },
-    {
-      "tag": "block",
-      "protocol": "blackhole",
-      "settings": {
-        "response": {
-          "type": "http"
-        }
-      }
-    }
-  ],
-  "routing": {
-    "domainStrategy": "AsIs",
-    "rules": [
-      {
-        "type": "field",
-        "inboundTag": [
-          "api"
-        ],
-        "outboundTag": "api",
-        "enabled": true
-      },
-      {
-        "id": "5627785659655799759",
-        "type": "field",
-        "port": "0-65535",
-        "outboundTag": "proxy",
-        "enabled": true
-      }
-    ]
-  }
-}
-EOF
-    )
+    echo -e "${yellow}Generating secure JSON config via jq...${rest}"
 
-    echo "$json" > config.json
-    echo -e "${yellow}==========================${rest}"
-    echo -e "${yellow}==========================${rest}"
-    cat config.json
-    echo -e "${yellow}===============================${rest}"
-    echo -e "${green}Config saved in ${yellow}config.json ${green}file${rest}"
-    echo -e "${yellow}==========================${rest}"
+    # Determine default fragment based on TLS
+    local def_packets="tlshello" def_length="1-3" def_interval="5-10"
+    if [[ "$security" != "tls" ]]; then
+        def_packets="1-1" def_length="5-10" def_interval="10-20"
+    fi
+
+    # Build JSON securely with jq
+    jq -n \
+        --arg name "$name+Fragment" \
+        --arg proto "$protocol" \
+        --arg addr "$address" \
+        --argjson p "$port" \
+        --arg id "$uuid" \
+        --arg pass "$pass" \
+        --arg net "$network" \
+        --arg path "$path" \
+        --arg host "$host" \
+        --arg sni "$sni" \
+        --arg sec "$security" \
+        --arg fp "$fp" \
+        --arg svc "$serviceName" \
+        --arg multi "$multiMode" \
+        --arg dpk "$def_packets" --arg dln "$def_length" --arg dit "$def_interval" \
+    '{
+      remarks: $name,
+      log: { loglevel: "warning" },
+      inbounds: [
+        { tag: "socks", port: 10808, listen: "127.0.0.1", protocol: "socks", settings: { auth: "noauth", udp: true } },
+        { tag: "http", port: 10809, listen: "127.0.0.1", protocol: "http", settings: { auth: "noauth", udp: true } }
+      ],
+      outbounds: [
+        {
+          tag: "proxy",
+          protocol: $proto,
+          settings: (if $proto == "trojan" then 
+            { servers: [{ address: $addr, password: $pass, port: $p }] } 
+          else 
+            { vnext: [{ address: $addr, port: $p, users: [{ id: $id, alterId: 0, security: "auto", encryption: "none" }] }] } 
+          end),
+          streamSettings: {
+            network: $net,
+            security: (if $sec == "tls" then "tls" else "none" end),
+            tlsSettings: (if $sec == "tls" then {
+                allowInsecure: false,
+                serverName: $sni,
+                fingerprint: ($fp // "chrome"),
+                alpn: ["h2", "http/1.1"]
+            } else null end),
+            wsSettings: (if $net == "ws" then { path: $path, headers: { Host: $host } } else null end),
+            grpcSettings: (if $net == "grpc" then { multiMode: ($multi == "true"), serviceName: $svc } else null end)
+          },
+          sockopt: { dialerProxy: "fragment", tcpFastOpen: true, tcpNoDelay: true }
+        },
+        {
+          tag: "fragment",
+          protocol: "freedom",
+          settings: {
+            domainStrategy: "AsIs",
+            fragment: { packets: $dpk, length: $dln, interval: $dit }
+          }
+        },
+        { tag: "direct", protocol: "freedom" },
+        { tag: "block", protocol: "blackhole" }
+      ],
+      routing: { domainStrategy: "AsIs", rules: [ { type: "field", port: "0-65535", outboundTag: "proxy" } ] }
+    }' > config.json
+
+    if [ $? -eq 0 ]; then
+        echo -e "${green}Config successfully generated and saved in ${yellow}config.json${rest}"
+    else
+        echo -e "${red}Failed to generate config.json!${rest}"
+    fi
+    
+    echo -en "${green}Press Enter to return to menu...${rest}"
+    read -r
 }
 
-# Main Menu
-clear
-echo -e "${cyan}By --> Peyman * Github.com/Ptechgithub * ${rest}"
-echo ""
-echo -e "${yellow}************************${rest}"
-echo -e "${yellow}*    ${purple}Fragment Tools${yellow}    *${rest}"
-echo -e "${yellow}************************${rest}"
-echo -e "${yellow}[${green}1${yellow}] ${green}Config To fragment${yellow} * ${rest}"
-echo -e "${yellow}                       *${rest}"
-echo -e "${yellow}[${green}2${yellow}] ${green}Fragment Scanner${yellow}   * ${rest}"
-echo -e "${yellow}                       *${rest}"
-echo -e "${yellow}[${red}0${yellow}] Exit               *${rest}"
-echo -e "${yellow}************************${rest}"
-echo -en "${cyan}Enter your choice: ${rest}"
-read -r choice
-case "$choice" in
-    1)
-        echo -e "${yellow}************************${rest}"
-        config2Fragment
-        ;;
-    2)
-        echo -e "${yellow}************************${rest}"
-        fragment_scanner
-        ;;
-    0)
-        echo -e "${yellow}************************${rest}"
-        echo -e "${cyan}Goodbye!${rest}"
-        exit
-        ;;
-    *)
-        echo -e "${yellow}********************${rest}"
-        echo -e "${red}Invalid choice. Please select a valid option.${rest}"
-        ;;
-esac
+# Main Menu Loop
+while true; do
+    clear
+    echo -e "${cyan}By --> Peyman * Github.com/Ptechgithub * ${rest}"
+    echo ""
+    echo -e "${yellow}************************${rest}"
+    echo -e "${yellow}*    ${purple}Fragment Tools${yellow}    *${rest}"
+    echo -e "${yellow}************************${rest}"
+    echo -e "${yellow}[${green}1${yellow}] ${green}Config To fragment${yellow} * ${rest}"
+    echo -e "${yellow}                       *${rest}"
+    echo -e "${yellow}[${green}2${yellow}] ${green}Fragment Scanner${yellow}   * ${rest}"
+    echo -e "${yellow}                       *${rest}"
+    echo -e "${yellow}[${red}0${yellow}] Exit               *${rest}"
+    echo -e "${yellow}************************${rest}"
+    echo -en "${cyan}Enter your choice: ${rest}"
+    read -r choice
+    
+    case "$choice" in
+        1) config2Fragment ;;
+        2) fragment_scanner ;;
+        0) 
+            echo -e "${yellow}************************${rest}"
+            echo -e "${cyan}Goodbye!${rest}"
+            pkill -f "xray run" 2>/dev/null
+            exit 
+            ;;
+        *) 
+            echo -e "${yellow}********************${rest}"
+            echo -e "${red}Invalid choice.${rest}"
+            sleep 1
+            ;;
+    esac
+done
