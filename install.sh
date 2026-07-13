@@ -369,7 +369,7 @@ config2Fragment() {
 # Main Menu Loop
 while true; do
     clear
-    echo -e "${cyan}By --> Peyman * Github.com/Ptechgithub * ${rest}"
+    echo -e "${cyan}By --> Fanmori * Github.com/Fanmori * ${rest}"
     echo ""
     echo -e "${yellow}************************${rest}"
     echo -e "${yellow}*    ${purple}Fragment Tools${yellow}    *${rest}"
