@@ -10,18 +10,11 @@ cyan='\033[0;36m'
 white='\033[0;37m'
 rest='\033[0m'
 
-if [ -d "$HOME/.termux" ] && [ -z "$(command -v jq)" ]; then
-    echo -e "${yellow}Running update & upgrade ...${rest}"
-    pkg update -y && pkg upgrade -y
-fi
-
-# Check and install necessary packages
+# Check and install ONLY essential packages
 install_packages() {
-    local packages=(wget curl unzip jq netcat-openbsd)
-    # For Termux, netcat is usually 'netcat' instead of 'netcat-openbsd'
-    [ -d "$HOME/.termux" ] && packages=(wget curl unzip jq netcat)
-    
+    local packages=(wget curl unzip jq)
     local missing_packages=()
+    
     for pkg in "${packages[@]}"; do
         if ! command -v "$pkg" &> /dev/null; then
             missing_packages+=("$pkg")
@@ -30,9 +23,7 @@ install_packages() {
 
     if [ ${#missing_packages[@]} -gt 0 ]; then
         echo -e "${cyan}Installing missing packages: ${missing_packages[*]}${rest}"
-        if [ -n "$(command -v pkg)" ]; then
-            pkg install "${missing_packages[@]}" -y
-        elif [ -n "$(command -v apt)" ]; then
+        if [ -n "$(command -v apt)" ]; then
             sudo apt update -y && sudo apt install "${missing_packages[@]}" -y
         elif [ -n "$(command -v dnf)" ]; then
             sudo dnf install "${missing_packages[@]}" -y
@@ -49,45 +40,37 @@ install_packages() {
 
 install_packages
 
-# Download and install Xray
+# Download and install Xray (Smart Check for Kali WSL)
 install_xray() {
+    if command -v xray &> /dev/null; then
+        local xray_loc=$(command -v xray)
+        local installed_version=$($xray_loc -version 2>/dev/null | grep -oE 'Xray [^ ]+' | awk '{print $2}')
+        echo -e "${green}Local Xray found at $xray_loc (v$installed_version). Skipping download.${rest}"
+        return
+    fi
+
     latest_version=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name | sed 's/^v//')
-    installed_version=""
+    echo -e "${yellow}Xray not found. Downloading v$latest_version...${rest}"
     
-    if [ -x "$PREFIX/bin/xray" ]; then
-        installed_version=$($PREFIX/bin/xray -version 2>/dev/null | grep -oE 'Xray [^ ]+' | awk '{print $2}')
-    fi
-
-    if [ "$installed_version" != "$latest_version" ]; then
-        echo -e "${yellow}Installing/Upgrading Xray to v$latest_version...${rest}"
-        
-        rm -f "$PREFIX/bin/xray" geoip.dat geosite.dat
-        # Automatically detect arch (Usually arm64 for Termux)
-        arch=$(uname -m)
-        file_name="Xray-linux-64.zip"
-        [ "$arch" == "aarch64" ] && file_name="Xray-android-arm64-v8a.zip"
-        [ "$arch" == "armv7l" ] && file_name="Xray-android-arm32-v7a.zip"
-        
-        url="https://github.com/XTLS/Xray-core/releases/download/v$latest_version/$file_name"
-
-        wget -q --show-progress "$url" -O "$file_name" || { echo -e "${red}Download failed.${rest}"; exit 1; }
-        unzip -oq "$file_name" || { echo -e "${red}Unzip failed.${rest}"; exit 1; }
-
-        mv xray "$PREFIX/bin/" 2>/dev/null || sudo mv xray /usr/local/bin/
-        chmod +x "$PREFIX/bin/xray" 2>/dev/null || sudo chmod +x /usr/local/bin/xray
-
-        rm -f README.md LICENSE "$file_name"
-        echo -e "${green}Xray v$latest_version installed successfully.${rest}"
-    else
-        echo -e "${green}Xray is up to date (v$installed_version).${rest}"
-    fi
+    arch=$(uname -m)
+    file_name="Xray-linux-64.zip"
+    [ "$arch" == "aarch64" ] && file_name="Xray-linux-arm64-v8a.zip"
+    
+    url="https://github.com/XTLS/Xray-core/releases/download/v$latest_version/$file_name"
+    wget -q --show-progress "$url" -O "$file_name" || { echo -e "${red}Download failed.${rest}"; exit 1; }
+    unzip -oq "$file_name"
+    sudo mv xray /usr/local/bin/
+    sudo chmod +x /usr/local/bin/xray
+    rm -f README.md LICENSE "$file_name"
+    echo -e "${green}Xray installed successfully.${rest}"
 }
 
 install_xray
 
 # Fragment Scanner
 fragment_scanner() {
-    XRAY_PATH="$PREFIX/bin/xray"
+    # Dynamically find Xray path (Fix for Kali/WSL)
+    XRAY_PATH="$(command -v xray)"
     CONFIG_PATH="config.json"
     LOG_FILE="pings.txt"
     XRAY_LOG_FILE="xraylogs.txt"
@@ -121,15 +104,12 @@ fragment_scanner() {
 
     HTTP_PROXY_SERVER="127.0.0.1"
 
-    # Advanced & Optimized Fragment Arrays (Based on anti-DPI research)
     packetsOptions=("tlshello" "1-1" "1-2" "1-3" "2-3")
     lengthOptions=("1-1" "1-2" "1-3" "2-5" "1-5" "5-10" "10-20" "20-50")
     intervalOptions=("1-1" "1-2" "3-5" "5-10" "10-20" "20-50" "50-100")
 
-    maxPossibleInstances=$((${#packetsOptions[@]} * ${#lengthOptions[@]} * ${#intervalOptions[@]}))
-
     declare -a topThree
-    declare -A usedCombinations # Global associative array to prevent duplicates
+    declare -A usedCombinations
 
     get_random_value() {
         local options=("$@")
@@ -166,10 +146,11 @@ fragment_scanner() {
         [ -n "$pids" ] && kill -9 $pids 2>/dev/null
     }
 
+    # 100% Internal Bash Port Checker
     wait_for_port() {
-        local port=$1 timeout=10 start=$(date +%s)
-        while ! nc -z 127.0.0.1 $port 2>/dev/null; do
-            if [ $(($(date +%s) - $start)) -ge $timeout ]; then return 1; fi
+        local port=$1 timeout=8 start=$SECONDS
+        while ! (echo > /dev/tcp/127.0.0.1/$port) 2>/dev/null; do
+            if (( SECONDS - start >= timeout )); then return 1; fi
             sleep 0.2
         done
         return 0
@@ -180,10 +161,9 @@ fragment_scanner() {
         local totalTime=0 validPings=0
 
         for ((i=1; i<=pingCount; i++)); do
-            # Using curl's built-in high-precision timer
             local time_sec=$(curl -w "%{time_total}" -o /dev/null -s --max-time "$TimeoutSec" -x "$HTTP_PROXY_SERVER:$HTTP_PROXY_PORT" "$url")
             
-            if [ -n "$time_sec" ] && [ "$(echo "$time_sec > 0" | bc -l 2>/dev/null || awk "BEGIN{print ($time_sec > 0)}")" == "1" ]; then
+            if [ -n "$time_sec" ] && awk "BEGIN{exit !($time_sec > 0)}"; then
                 local time_ms=$(awk "BEGIN {printf \"%.0f\", $time_sec * 1000}")
                 totalTime=$((totalTime + time_ms))
                 validPings=$((validPings + 1))
@@ -209,18 +189,16 @@ fragment_scanner() {
         
         "$XRAY_PATH" run -c "$CONFIG_PATH" &> "$XRAY_LOG_FILE" &
         
-        # Smart wait instead of blind sleep 3
         if ! wait_for_port "$HTTP_PROXY_PORT"; then
-            echo -e "|      $(printf "%-4s" "$((i + 1))")    |       $(printf "%-8s" "$packets")  |      $(printf "%-7s" "$length")  |      $(printf "%-7s" "$interval")    |      FAIL     |"
+            printf "|      %-4s    |       %-8s  |      %-7s  |      %-7s    |      FAIL     |\n" "$((i + 1))" "$packets" "$length" "$interval"
             continue
         fi
 
         averagePing=$(send_http_request "$PingCount")
-        
         topThree+=("$((i + 1)),$packets,$length,$interval,$averagePing")
 
         if [ "$averagePing" -gt 0 ]; then
-            printf "|      %-4s    |       %-8s  |      %-7s  |      %-7s    |      %-5s ms |\n" "$((i + 1))" "$packets" "$length" "$interval" "$averagePing"
+            printf "|      %-4s    |       %-8s  |      %-7s  |      %-7s    |    %-6s ms  |\n" "$((i + 1))" "$packets" "$length" "$interval" "$averagePing"
         else
             printf "|      %-4s    |       %-8s  |      %-7s  |      %-7s    |      FAIL     |\n" "$((i + 1))" "$packets" "$length" "$interval"
         fi
@@ -245,7 +223,7 @@ fragment_scanner() {
             echo -e "${purple}Packets: ${arr[1]} ${cyan}| Length: ${arr[2]} ${cyan}| Interval: ${arr[3]} ${green}-> ${white}${arr[4]} ms${rest}"
         done
     else
-        echo -e "${red}No successful pings recorded.${rest}"
+        echo -e "${red}No successful pings recorded. Config might be dead.${rest}"
     fi
 
     stop_xray_process
@@ -254,7 +232,7 @@ fragment_scanner() {
     read -r
 }
 
-# ADD FRAGMENT TO CONFIG (100% JQ Based - No String Concat Bugs)
+# ADD FRAGMENT TO CONFIG (Using JQ)
 config2Fragment() {
     echo -en "${green}Enter your Config [${yellow}VLESS${cyan}/${yellow}VMESS${cyan}/${yellow}TROJAN${green}][${yellow}Ws${cyan}/${yellow}Grpc${green}]: ${rest}"
     read -r link
@@ -313,13 +291,11 @@ config2Fragment() {
 
     echo -e "${yellow}Generating secure JSON config via jq...${rest}"
 
-    # Determine default fragment based on TLS
     local def_packets="tlshello" def_length="1-3" def_interval="5-10"
     if [[ "$security" != "tls" ]]; then
         def_packets="1-1" def_length="5-10" def_interval="10-20"
     fi
 
-    # Build JSON securely with jq
     jq -n \
         --arg name "$name+Fragment" \
         --arg proto "$protocol" \
